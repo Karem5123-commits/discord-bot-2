@@ -1,4 +1,6 @@
 import express from "express";
+import mongoose from "mongoose";
+import dotenv from "dotenv";
 import {
   Client,
   GatewayIntentBits,
@@ -8,22 +10,18 @@ import {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
-  StringSelectMenuBuilder
+  StringSelectMenuBuilder,
+  REST,
+  Routes
 } from "discord.js";
-import mongoose from "mongoose";
-import dotenv from "dotenv";
 
 dotenv.config();
 
 // =====================
-// KEEP ALIVE (RENDER)
+// KEEP ALIVE (Render)
 // =====================
 const app = express();
-
-app.get("/", (req, res) => {
-  res.send("Bot is alive!");
-});
-
+app.get("/", (req, res) => res.send("Bot is alive!"));
 app.listen(process.env.PORT || 3000, () => {
   console.log("🌐 Web server running");
 });
@@ -53,13 +51,64 @@ client.once("ready", () => {
 });
 
 // =====================
-// SLASH COMMANDS
+// SLASH COMMANDS (AUTO REGISTER)
+// =====================
+const commands = [
+  {
+    name: "setup",
+    description: "Show buttons"
+  },
+  {
+    name: "ping",
+    description: "Check bot"
+  },
+  {
+    name: "kick",
+    description: "Kick a user",
+    options: [
+      {
+        name: "user",
+        type: 6,
+        description: "User to kick",
+        required: true
+      }
+    ]
+  },
+  {
+    name: "ban",
+    description: "Ban a user",
+    options: [
+      {
+        name: "user",
+        type: 6,
+        description: "User to ban",
+        required: true
+      }
+    ]
+  }
+];
+
+const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
+
+(async () => {
+  try {
+    console.log("🔄 Registering slash commands...");
+    await rest.put(
+      Routes.applicationCommands(process.env.CLIENT_ID),
+      { body: commands }
+    );
+    console.log("✅ Slash commands registered!");
+  } catch (err) {
+    console.error(err);
+  }
+})();
+
+// =====================
+// INTERACTIONS
 // =====================
 client.on("interactionCreate", async (interaction) => {
 
-  // =====================
   // SLASH COMMANDS
-  // =====================
   if (interaction.isChatInputCommand()) {
 
     if (interaction.commandName === "ping") {
@@ -72,7 +121,6 @@ client.on("interactionCreate", async (interaction) => {
           .setCustomId("rank")
           .setLabel("Select Rank")
           .setStyle(ButtonStyle.Primary),
-
         new ButtonBuilder()
           .setCustomId("msg")
           .setLabel("Send Message")
@@ -85,9 +133,6 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    // =====================
-    // MODERATION
-    // =====================
     if (interaction.commandName === "kick") {
       const user = interaction.options.getUser("user");
       const member = await interaction.guild.members.fetch(user.id);
@@ -105,24 +150,25 @@ client.on("interactionCreate", async (interaction) => {
     }
   }
 
-  // =====================
   // BUTTONS
-  // =====================
   if (interaction.isButton()) {
     const userId = interaction.user.id;
 
     if (interaction.customId === "rank") {
       const menu = new StringSelectMenuBuilder()
         .setCustomId(`select-${userId}`)
+        .setPlaceholder("Choose your rank")
         .addOptions([
           { label: "Bronze", value: "Bronze" },
           { label: "Silver", value: "Silver" },
-          { label: "Gold", value: "Gold" },
+          { label: "Gold", value: "Gold" }
         ]);
 
+      const row = new ActionRowBuilder().addComponents(menu);
+
       return interaction.reply({
-        content: "Choose rank:",
-        components: [new ActionRowBuilder().addComponents(menu)],
+        content: "Select your rank:",
+        components: [row],
         ephemeral: true
       });
     }
@@ -137,15 +183,15 @@ client.on("interactionCreate", async (interaction) => {
         .setLabel("Your message")
         .setStyle(TextInputStyle.Paragraph);
 
-      modal.addComponents(new ActionRowBuilder().addComponents(input));
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(input)
+      );
 
       return interaction.showModal(modal);
     }
   }
 
-  // =====================
   // SELECT MENU
-  // =====================
   if (interaction.isStringSelectMenu()) {
     const userId = interaction.customId.split("-")[1];
     const rank = interaction.values[0];
@@ -157,14 +203,12 @@ client.on("interactionCreate", async (interaction) => {
     );
 
     const user = await client.users.fetch(userId);
-    await user.send(`🏆 You got rank: ${rank}`);
+    await user.send(`🏆 Your rank is now: ${rank}`);
 
-    return interaction.reply({ content: "Saved!", ephemeral: true });
+    return interaction.reply({ content: "✅ Saved!", ephemeral: true });
   }
 
-  // =====================
   // MODAL
-  // =====================
   if (interaction.isModalSubmit()) {
     const userId = interaction.customId.split("_")[1];
     const msg = interaction.fields.getTextInputValue("msg");
@@ -173,7 +217,7 @@ client.on("interactionCreate", async (interaction) => {
 
     await channel.send(`📩 Message from <@${userId}>:\n${msg}`);
 
-    return interaction.reply({ content: "Sent!", ephemeral: true });
+    return interaction.reply({ content: "✅ Sent!", ephemeral: true });
   }
 });
 
