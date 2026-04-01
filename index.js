@@ -14,10 +14,7 @@ import {
 const execPromise = promisify(ytExec);
 dotenv.config();
 
-/**
- * 🚀 PERFORMANCE CONFIGURATION
- * Optimized for Render Free Tier (512MB RAM / 0.5 CPU)
- */
+// ===== ELITE CONFIGURATION =====
 const CONFIG = {
   RANKS: ["A", "S", "S+", "SS", "SS+", "SSS"],
   COLORS: { A: "#95a5a6", S: "#f1c40f", "S+": "#f39c12", SS: "#e67e22", "SS+": "#d35400", SSS: "#e74c3c" },
@@ -25,170 +22,139 @@ const CONFIG = {
     A: "1488208696759685190", S: "1488208584142753863", "S+": "1488208494170738793", 
     SS: "1488208281930432602", "SS+": "1488208185633280041", SSS: "1488208025859788860" 
   },
-  FFMPEG_LIMITER: "-threads 1 -preset superfast -crf 22", // Balanced for Render
-  MAX_MB: 25
+  // Mathematical 4K 4:5 scaling with high-quality Lanczos & Sharpening
+  FFMPEG_ENGINE: 'scale=1080:1350:flags=lanczos,unsharp=5:5:1.5:5:5:1.5',
+  MAX_MB: 24.5
 };
 
-// ===== DATABASE =====
-const userSchema = new mongoose.Schema({
-  userId: { type: String, unique: true, index: true },
-  currentRank: { type: String, default: "Unranked" },
-  totalSubmissions: { type: Number, default: 0 },
-  history: [{ rank: String, feedback: String, date: { type: Date, default: Date.now } }]
-});
-const User = mongoose.model("User", userSchema);
+// ===== DATABASE CONNECTIONS =====
+await mongoose.connect(process.env.MONGO_URI).then(() => console.log("💎 Titan DB Link Established")).catch(e => console.error("❌ DB Error:", e));
 
-// ===== PRO-LEVEL TASK QUEUE =====
-class MediaQueue {
-  constructor() {
-    this.queue = [];
-    this.active = false;
-  }
-  async push(task) {
-    this.queue.push(task);
-    this.next();
-  }
-  async next() {
-    if (this.active || this.queue.length === 0) return;
-    this.active = true;
-    const currentTask = this.queue.shift();
-    try { await currentTask(); } catch (e) { console.error("Queue Task Failed:", e); }
-    this.active = false;
-    this.next();
-  }
-}
-const VideoQueue = new MediaQueue();
+const QualityDB = mongoose.model("QualityData", new mongoose.Schema({ userId: String, totalEnhanced: { type: Number, default: 0 } }));
+const StreamableDB = mongoose.model("StreamableData", new mongoose.Schema({ userId: { type: String, unique: true }, currentRank: { type: String, default: "Unranked" }, totalSubmissions: { type: Number, default: 0 } }));
 
-// ===== DISCORD ENGINE =====
-const client = new Client({ 
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] 
-});
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
 
-// ===== WEB INTERFACE (KEEP-ALIVE) =====
+// ===== EXPRESS KEEP-ALIVE =====
 const app = express();
-app.get("/", (req, res) => res.status(200).json({ status: "online", memory: process.memoryUsage().rss }));
-app.listen(process.env.PORT || 3000);
+app.get("/", (req, res) => res.status(200).send("APEX TITAN ENGINE: ONLINE"));
+app.listen(process.env.PORT || 3000, "0.0.0.0");
 
-// ===== CORE LOGIC =====
+// ===== COMMAND SYNC =====
 client.once("ready", async () => {
-  console.log(`[SYSTEM] Logged in as ${client.user.tag}`);
-  client.user.setActivity("4K Quality Engine", { type: ActivityType.Competing });
-
+  console.log(`🚀 APEX TITAN DEPLOYED: ${client.user.tag}`);
+  client.user.setActivity("4K Render Engine", { type: ActivityType.Streaming, url: "https://twitch.tv/discord" });
+  
   const commands = [
-    { name: "submit", description: "Submit your edit" },
-    { name: "profile", description: "Check your stats" },
-    { name: "quality_method", description: "Apply 4K 4:5 Enhancement", options: [{ name: "url", type: 3, description: "Video URL", required: true }] },
-    { name: "dl", description: "Direct Video Download", options: [{ name: "url", type: 3, description: "Video URL", required: true }] }
+    { name: "submit", description: "Submit clip for ranking" },
+    { name: "profile", description: "View editor status" },
+    { name: "quality_method", description: "TITAN 4K ENHANCE", options: [{ name: "url", type: 3, description: "Video URL", required: true }] }
   ];
-
   try {
     const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
     await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID), { body: commands });
-    console.log("[SYSTEM] Commands Synced");
-  } catch (e) { console.error("[ERROR] Command Sync Failed:", e); }
+  } catch (e) { console.error("Sync Error:", e); }
 });
 
+// ===== INTERACTION SYSTEM =====
 client.on("interactionCreate", async (i) => {
-  if (i.isChatInputCommand()) {
-    const { commandName, options, user } = i;
+  if (!i.isCommand() && !i.isModalSubmit() && !i.isButton()) return;
 
-    // --- ENHANCED QUALITY METHOD ---
-    if (commandName === "quality_method") {
-      await i.reply("⏳ **Queueing Request...** This process uses high-CPU resources.");
-      
-      VideoQueue.push(async () => {
-        const input = `in_${user.id}.mp4`;
-        const output = `out_${user.id}.mp4`;
+  try {
+    // --- 4K QUALITY COMMAND ---
+    if (i.commandName === "quality_method") {
+      await i.reply("🌀 **Initializing Titan Encode...** (Checking system RAM)");
+      const url = i.options.getString("url");
+      const input = `in_${i.user.id}.mp4`;
+      const output = `out_${i.user.id}.mp4`;
+
+      try {
+        await i.editReply("📥 **Stage 1: Streaming Source...**");
+        await ytdl(url, { output: input, format: 'bestvideo[height<=1080]+bestaudio/best' });
         
-        try {
-          await i.editReply("📥 **Downloading Source...**");
-          await ytdl(options.getString("url"), { output: input, format: 'bestvideo[height<=1080]+bestaudio/best' });
-          
-          await i.editReply("⚙️ **Applying 4K Mathematical Scaling...**");
-          const cmd = `ffmpeg -i ${input} -vf "crop=ih*4/5:ih,scale=1080:1350:flags=lanczos,unsharp=3:3:1.0:3:3:1.0" ${CONFIG.FFMPEG_LIMITER} -c:a copy ${output}`;
-          await execPromise(cmd);
+        await i.editReply("⚙️ **Stage 2: 4K 4:5 Titan Scaling...** (Processing Frames)");
+        // Optimized for Render Free: superfast + threads 1 prevents "Out of Memory" crashes
+        const ffmpegCmd = `ffmpeg -i ${input} -vf "${CONFIG.FFMPEG_ENGINE}" -threads 1 -preset superfast -crf 21 -c:a copy ${output}`;
+        await execPromise(ffmpegCmd);
 
-          const stats = fs.statSync(output);
-          if (stats.size > CONFIG.MAX_MB * 1024 * 1024) {
-            return await i.editReply("❌ **Error:** Output file exceeds Discord's 25MB limit.");
-          }
-
-          await i.editReply({ content: "✨ **Enhancement Complete**", files: [new AttachmentBuilder(output)] });
-        } catch (e) {
-          await i.editReply("❌ **Failed:** The URL is invalid or the video is too long.");
-        } finally {
-          [input, output].forEach(f => fs.existsSync(f) && fs.unlinkSync(f));
+        const fileSize = fs.statSync(output).size / (1024 * 1024);
+        if (fileSize > CONFIG.MAX_MB) {
+          return i.editReply(`❌ **Titan Error:** File is ${fileSize.toFixed(1)}MB (Limit is 25MB). Use a shorter clip.`);
         }
-      });
+
+        await i.editReply({ content: "✨ **APEX 4K RENDER COMPLETE**", files: [new AttachmentBuilder(output)] });
+        await QualityDB.findOneAndUpdate({ userId: i.user.id }, { $inc: { totalEnhanced: 1 } }, { upsert: true });
+      } catch (e) {
+        await i.editReply("❌ **System Overload:** Link unsupported or clip too long.");
+      } finally {
+        [input, output].forEach(f => fs.existsSync(f) && fs.unlinkSync(f));
+      }
     }
 
-    // --- FAST PROFILE ---
-    if (commandName === "profile") {
-      const data = await User.findOne({ userId: user.id });
-      if (!data) return i.reply("No profile found. Submit an edit first!");
-      
+    // --- PROFILE COMMAND ---
+    if (i.commandName === "profile") {
+      const sData = await StreamableDB.findOne({ userId: i.user.id });
+      const qData = await QualityDB.findOne({ userId: i.user.id });
       const embed = new EmbedBuilder()
-        .setAuthor({ name: user.username, iconURL: user.displayAvatarURL() })
-        .setTitle("Editor Statistics")
+        .setAuthor({ name: i.user.username, iconURL: i.user.displayAvatarURL() })
+        .setTitle("Editor Profile")
         .addFields(
-          { name: "Current Rank", value: `\`${data.currentRank}\``, inline: true },
-          { name: "Total Submissions", value: `\`${data.totalSubmissions}\``, inline: true }
+          { name: "Rank", value: `\`${sData?.currentRank || "Unranked"}\``, inline: true },
+          { name: "Submissions", value: `\`${sData?.totalSubmissions || 0}\``, inline: true },
+          { name: "4K Renders", value: `\`${qData?.totalEnhanced || 0}\``, inline: true }
         )
-        .setColor(CONFIG.COLORS[data.currentRank] || "#2b2d31")
-        .setTimestamp();
-      
+        .setColor(CONFIG.COLORS[sData?.currentRank] || "#ffffff")
+        .setFooter({ text: "Apex Ultra v4.0" });
       return i.reply({ embeds: [embed] });
     }
 
-    // --- SUBMISSION MODAL ---
-    if (commandName === "submit") {
-      const modal = new ModalBuilder().setCustomId("sub_modal").setTitle("Edit Submission");
-      modal.addComponents(new ActionRowBuilder().addComponents(
-        new TextInputBuilder().setCustomId("link").setLabel("Clip Link (YouTube/TikTok/Streamable)").setStyle(TextInputStyle.Short).setRequired(true)
-      ));
+    // --- SUBMISSION COMMAND ---
+    if (i.commandName === "submit") {
+      const modal = new ModalBuilder().setCustomId("sub_modal").setTitle("Submit Edit");
+      modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("link").setLabel("Streamable/Video Link").setStyle(TextInputStyle.Short).setRequired(true)));
       await i.showModal(modal);
     }
-  }
 
-  // --- MODAL HANDLING ---
-  if (i.isModalSubmit() && i.customId === "sub_modal") {
-    const link = i.fields.getTextInputValue("link");
-    const reviewChan = await i.guild.channels.fetch(process.env.REVIEW_CHANNEL_ID).catch(() => null);
-    
-    const rows = [
-      new ActionRowBuilder().addComponents(CONFIG.RANKS.slice(0, 3).map(r => new ButtonBuilder().setCustomId(`rank_${r}_${i.user.id}`).setLabel(r).setStyle(ButtonStyle.Secondary))),
-      new ActionRowBuilder().addComponents(CONFIG.RANKS.slice(3).map(r => new ButtonBuilder().setCustomId(`rank_${r}_${i.user.id}`).setLabel(r).setStyle(ButtonStyle.Secondary)))
-    ];
+    // --- MODAL HANDLER ---
+    if (i.isModalSubmit() && i.customId === "sub_modal") {
+      const link = i.fields.getTextInputValue("link");
+      const reviewChan = await i.guild.channels.fetch(process.env.REVIEW_CHANNEL_ID).catch(() => null);
+      
+      if (!reviewChan) return i.reply({ content: "❌ **Error:** Review channel ID invalid.", ephemeral: true });
 
-    await reviewChan?.send({ content: `🎬 **New Submission: <@${i.user.id}>**\n${link}`, components: rows });
-    return i.reply({ content: "🚀 **Success!** Your edit is now with staff.", ephemeral: true });
-  }
+      const rows = [
+        new ActionRowBuilder().addComponents(CONFIG.RANKS.slice(0, 3).map(r => new ButtonBuilder().setCustomId(`rank_${r}_${i.user.id}`).setLabel(r).setStyle(ButtonStyle.Secondary))),
+        new ActionRowBuilder().addComponents(CONFIG.RANKS.slice(3).map(r => new ButtonBuilder().setCustomId(`rank_${r}_${i.user.id}`).setLabel(r).setStyle(ButtonStyle.Secondary)))
+      ];
 
-  // --- STAFF ACTIONS ---
-  if (i.isButton() && i.customId.startsWith("rank_")) {
-    if (!i.member.permissions.has(PermissionsBitField.Flags.ManageRoles)) return i.reply({ content: "Unauthorized.", ephemeral: true });
-    
-    const [_, rank, userId] = i.customId.split("_");
-    await User.findOneAndUpdate({ userId }, { currentRank: rank, $inc: { totalSubmissions: 1 } }, { upsert: true });
-    
-    const member = await i.guild.members.fetch(userId).catch(() => null);
-    if (member) {
-      await member.roles.remove(Object.values(CONFIG.ROLES)).catch(() => {});
-      if (CONFIG.ROLES[rank]) await member.roles.add(CONFIG.ROLES[rank]);
+      await reviewChan.send({ content: `🎬 **Titan Submission from <@${i.user.id}>**\n${link}`, components: rows });
+      return i.reply({ content: "✅ **Success!** Your edit is in the review queue.", ephemeral: true });
     }
 
-    const resChan = await i.guild.channels.fetch(process.env.RESULT_CHANNEL_ID).catch(() => null);
-    resChan?.send({ embeds: [new EmbedBuilder().setTitle("Rank Updated").setDescription(`<@${userId}> is now rank **${rank}**`).setColor(CONFIG.COLORS[rank])] });
-    
-    await i.message.delete();
-    return i.reply({ content: "Ranked successfully.", ephemeral: true });
-  }
-});
+    // --- BUTTON RANKING ---
+    if (i.isButton() && i.customId.startsWith("rank_")) {
+      if (!i.member.permissions.has(PermissionsBitField.Flags.ManageRoles)) return i.reply({ content: "Staff only.", ephemeral: true });
+      
+      const [_, rank, userId] = i.customId.split("_");
+      await StreamableDB.findOneAndUpdate({ userId }, { currentRank: rank, $inc: { totalSubmissions: 1 } }, { upsert: true });
+      
+      const member = await i.guild.members.fetch(userId).catch(() => null);
+      if (member) {
+        await member.roles.remove(Object.values(CONFIG.ROLES)).catch(() => {});
+        if (CONFIG.ROLES[rank]) await member.roles.add(CONFIG.ROLES[rank]);
+      }
 
-// ===== GRACEFUL SHUTDOWN =====
-process.on("SIGINT", async () => {
-  await mongoose.disconnect();
-  process.exit(0);
+      const resChan = await i.guild.channels.fetch(process.env.RESULT_CHANNEL_ID).catch(() => null);
+      if (resChan) {
+        await resChan.send({ embeds: [new EmbedBuilder().setTitle("Rank Promoted!").setDescription(`<@${userId}> is now rank **${rank}**`).setColor(CONFIG.COLORS[rank])] });
+      }
+      
+      await i.message.delete();
+      return i.reply({ content: `Ranked <@${userId}> as ${rank}`, ephemeral: true });
+    }
+  } catch (err) {
+    console.error("Critical Error:", err);
+  }
 });
 
 client.login(process.env.DISCORD_TOKEN);
