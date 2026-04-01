@@ -19,7 +19,7 @@ import {
 dotenv.config();
 
 // =====================
-// KEEP ALIVE
+// KEEP ALIVE (RENDER)
 // =====================
 const app = express();
 app.get("/", (req, res) => res.send("Bot running"));
@@ -30,12 +30,14 @@ app.listen(process.env.PORT || 3000);
 // =====================
 await mongoose.connect(process.env.MONGO_URI);
 
-const Submission = mongoose.model("Submission", new mongoose.Schema({
+const schema = new mongoose.Schema({
   userId: String,
   link: String,
   rank: String,
   date: Date
-}));
+});
+
+const Submission = mongoose.model("Submission", schema);
 
 // =====================
 // ROLE MAP
@@ -48,8 +50,6 @@ const rankRoles = {
   "SS+": "1488208185633280041",
   "SSS": "1488208025859788860"
 };
-
-const rankOrder = ["A","S","S+","SS","SS+","SSS"];
 
 // =====================
 // CLIENT
@@ -69,20 +69,34 @@ const commands = [
 
 const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
 
+// AUTO DEPLOY COMMANDS
 async function deployCommands() {
-  await rest.put(
-    Routes.applicationGuildCommands(
-      process.env.CLIENT_ID,
-      process.env.GUILD_ID
-    ),
-    { body: commands }
-  );
+  try {
+    await rest.put(
+      Routes.applicationGuildCommands(
+        process.env.CLIENT_ID,
+        process.env.GUILD_ID
+      ),
+      { body: commands }
+    );
+    console.log("✅ Commands updated");
+  } catch (err) {
+    console.error("❌ Command deploy error:", err);
+  }
 }
 
+// =====================
+// READY
+// =====================
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   await deployCommands();
 });
+
+// =====================
+// RANK ORDER
+// =====================
+const rankOrder = ["A","S","S+","SS","SS+","SSS"];
 
 // =====================
 // COOLDOWN
@@ -100,13 +114,21 @@ client.on("interactionCreate", async (interaction) => {
     // =====================
     if (interaction.isChatInputCommand()) {
 
+      // RANK
       if (interaction.commandName === "rank") {
         const data = await Submission.findOne({ userId: interaction.user.id });
-        return interaction.reply(
-          data?.rank ? `🏆 Rank: **${data.rank}**` : "❌ No rank yet."
-        );
+
+        if (!data || !data.rank) {
+          return interaction.reply({ content: "❌ No rank yet.", flags: 64 });
+        }
+
+        return interaction.reply({
+          content: `🏆 Your rank: **${data.rank}**`,
+          flags: 64
+        });
       }
 
+      // LEADERBOARD
       if (interaction.commandName === "leaderboard") {
         const data = await Submission.find();
 
@@ -121,15 +143,19 @@ client.on("interactionCreate", async (interaction) => {
           `#${i + 1} <@${x.userId}> → ${x.rank}`
         ).join("\n");
 
-        return interaction.reply(`🏆 Leaderboard:\n\n${text || "No data yet."}`);
+        return interaction.reply({
+          content: `🏆 Leaderboard:\n\n${text || "No data yet."}`,
+          flags: 64
+        });
       }
 
+      // SUBMIT
       if (interaction.commandName === "submit") {
 
         if (cooldown.has(interaction.user.id)) {
           return interaction.reply({
             content: "⏳ Wait before submitting again.",
-            ephemeral: true
+            flags: 64
           });
         }
 
@@ -143,7 +169,8 @@ client.on("interactionCreate", async (interaction) => {
         const link = new TextInputBuilder()
           .setCustomId("link")
           .setLabel("Streamable Link")
-          .setStyle(TextInputStyle.Short);
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true);
 
         modal.addComponents(
           new ActionRowBuilder().addComponents(link)
@@ -154,7 +181,7 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     // =====================
-    // SUBMIT MODAL
+    // MODAL SUBMIT
     // =====================
     if (interaction.isModalSubmit() && interaction.customId === "submit_modal") {
 
@@ -166,18 +193,13 @@ client.on("interactionCreate", async (interaction) => {
         { upsert: true }
       );
 
+      // ✅ FETCH REVIEW CHANNEL (SERVER B)
       let channel;
-
       try {
-        const guild = await client.guilds.fetch(process.env.TARGET_GUILD_ID);
-        channel = await guild.channels.fetch(process.env.TARGET_CHANNEL_ID);
+        channel = await client.channels.fetch(process.env.REVIEW_CHANNEL_ID);
       } catch (err) {
-        console.error("❌ Fetch error:", err);
-      }
-
-      if (!channel || !channel.isTextBased()) {
-        console.log("⚠️ Using fallback channel");
-        channel = interaction.channel;
+        console.error("❌ Channel fetch failed:", err);
+        return interaction.reply({ content: "❌ Channel error.", flags: 64 });
       }
 
       const embed = new EmbedBuilder()
@@ -194,12 +216,15 @@ client.on("interactionCreate", async (interaction) => {
         )
       );
 
-      await channel.send({ embeds: [embed], components: [buttons] });
+      try {
+        await channel.send({ embeds: [embed], components: [buttons] });
+      } catch (err) {
+        console.error("❌ Send failed:", err);
+        return interaction.reply({ content: "❌ Cannot send message.", flags: 64 });
+      }
 
-      await interaction.reply({
-        content: "✅ Submitted!",
-        ephemeral: true
-      });
+      await interaction.user.send("✅ Submission sent!");
+      return interaction.reply({ content: "Submitted!", flags: 64 });
     }
 
     // =====================
@@ -208,7 +233,7 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isButton() && interaction.customId.startsWith("rank_")) {
 
       if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-        return interaction.reply({ content: "❌ Admin only.", ephemeral: true });
+        return interaction.reply({ content: "❌ Admin only.", flags: 64 });
       }
 
       const [_, rank, userId] = interaction.customId.split("_");
@@ -230,7 +255,7 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     // =====================
-    // FEEDBACK
+    // FINAL FEEDBACK
     // =====================
     if (interaction.isModalSubmit() && interaction.customId.startsWith("feedback_")) {
 
@@ -241,32 +266,33 @@ client.on("interactionCreate", async (interaction) => {
       const guild = await client.guilds.fetch(process.env.GUILD_ID);
       const member = await guild.members.fetch(userId);
 
+      // REMOVE OLD ROLES
       await member.roles.remove(Object.values(rankRoles)).catch(() => {});
-      if (rankRoles[rank]) await member.roles.add(rankRoles[rank]).catch(() => {});
 
+      // ADD NEW ROLE
+      const roleId = rankRoles[rank];
+      if (roleId) await member.roles.add(roleId).catch(() => {});
+
+      // DM USER
       await user.send(`🏆 Rank: **${rank}**\n\n💬 ${msg}`);
 
-      try {
-        const resultChannel = await client.channels.fetch(process.env.RESULT_CHANNEL_ID);
+      // SEND RESULT
+      const resultChannel = await client.channels.fetch(process.env.RESULT_CHANNEL_ID);
 
-        const embed = new EmbedBuilder()
-          .setTitle("🏆 Ranked Result")
-          .setDescription(`<@${userId}> → **${rank}**\n\n💬 ${msg}`)
-          .setColor("Green");
+      const embed = new EmbedBuilder()
+        .setTitle("🏆 Ranked Result")
+        .setDescription(`<@${userId}> → **${rank}**\n\n💬 ${msg}`)
+        .setColor("Green");
 
-        await resultChannel.send({ embeds: [embed] });
-      } catch (err) {
-        console.error("❌ Result channel error:", err);
-      }
+      await resultChannel.send({ embeds: [embed] });
 
-      return interaction.reply({ content: "✅ Done!", ephemeral: true });
+      return interaction.reply({ content: "✅ Done!", flags: 64 });
     }
 
   } catch (err) {
-    console.error("🔥 ERROR:", err);
-    if (!interaction.replied) {
-      interaction.reply({ content: "❌ Error occurred.", ephemeral: true });
-    }
+    console.error("❌ GLOBAL ERROR:", err);
+    if (interaction.replied || interaction.deferred) return;
+    return interaction.reply({ content: "❌ Internal error.", flags: 64 });
   }
 });
 
