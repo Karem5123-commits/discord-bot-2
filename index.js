@@ -1,6 +1,17 @@
 import express from "express";
 import mongoose from "mongoose";
 import dotenv from "dotenv";
+
+// ✅ SAFE CANVAS IMPORT (won’t crash bot if it fails)
+let createCanvas, loadImage;
+try {
+  const canvas = await import("@napi-rs/canvas");
+  createCanvas = canvas.createCanvas;
+  loadImage = canvas.loadImage;
+} catch {
+  console.log("⚠️ Canvas disabled (no native support)");
+}
+
 import {
   Client,
   GatewayIntentBits,
@@ -13,281 +24,325 @@ import {
   REST,
   Routes,
   EmbedBuilder,
-  PermissionsBitField
+  PermissionsBitField,
+  AttachmentBuilder,
+  ActivityType
 } from "discord.js";
 
 dotenv.config();
 
-// =====================
-// KEEP ALIVE (RENDER)
-// =====================
-const app = express();
-app.get("/", (req, res) => res.send("Bot running"));
-app.listen(process.env.PORT || 3000, () => {
-  console.log("🌐 Web server running");
-});
+// ===== DATABASE =====
+await mongoose.connect(process.env.MONGO_URI);
 
-// =====================
-// DATABASE
-// =====================
-try {
-  await mongoose.connect(process.env.MONGO_URI);
-  console.log("✅ MongoDB connected");
-} catch (err) {
-  console.error("❌ MongoDB failed:", err);
-}
-
-// =====================
-// MODEL
-// =====================
-const Submission = mongoose.model("Submission", new mongoose.Schema({
-  userId: String,
-  link: String,
-  rank: String,
-  date: Date
+// ===== SCHEMAS =====
+const User = mongoose.model("User", new mongoose.Schema({
+  userId: { type: String, unique: true },
+  currentRank: { type: String, default: "Unranked" },
+  totalSubmissions: { type: Number, default: 0 },
+  lastLink: String,
+  history: [{
+    rank: String,
+    feedback: String,
+    staffId: String,
+    date: { type: Date, default: Date.now }
+  }]
 }));
 
-// =====================
-// CONFIG
-// =====================
-const rankRoles = {
-  "A": "1488208696759685190",
-  "S": "1488208584142753863",
-  "S+": "1488208494170738793",
-  "SS": "1488208281930432602",
-  "SS+": "1488208185633280041",
-  "SSS": "1488208025859788860"
+const Staff = mongoose.model("Staff", new mongoose.Schema({
+  staffId: { type: String, unique: true },
+  reviewsCount: { type: Number, default: 0 },
+  lastReview: Date
+}));
+
+// ===== CONFIG =====
+const CONFIG = {
+  RANKS: ["A","S","S+","SS","SS+","SSS"],
+  COLORS: {
+    A:"#95a5a6", S:"#f1c40f", "S+":"#f39c12",
+    SS:"#e67e22","SS+":"#d35400","SSS":"#e74c3c"
+  },
+  ROLES: {
+    A:"1488208696759685190",
+    S:"1488208584142753863",
+    "S+":"1488208494170738793",
+    SS:"1488208281930432602",
+    "SS+":"1488208185633280041",
+    SSS:"1488208025859788860"
+  },
+  COOLDOWNS: new Map(),
+  PROCESSING: new Set()
 };
 
-const rankOrder = ["A","S","S+","SS","SS+","SSS"];
-const cooldown = new Map();
-
-// =====================
-// CLIENT
-// =====================
+// ===== CLIENT =====
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
 });
 
-// =====================
-// COMMANDS
-// =====================
-const commands = [
-  { name: "submit", description: "Submit your edit" },
-  { name: "rank", description: "Check your rank" },
-  { name: "leaderboard", description: "Top ranked users" }
-];
+// ===== SAFE RANK CARD =====
+async function generateCard(user, rank) {
+  if (!createCanvas) return null;
 
-const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
+  const canvas = createCanvas(800, 300);
+  const ctx = canvas.getContext("2d");
 
-// =====================
-// DEPLOY COMMANDS
-// =====================
-async function deployCommands() {
+  ctx.fillStyle = "#1a1c1e";
+  ctx.fillRect(0,0,800,300);
+
+  ctx.fillStyle = CONFIG.COLORS[rank] || "#fff";
+  ctx.font = "bold 50px sans-serif";
+  ctx.fillText(rank, 600, 160);
+
+  ctx.fillStyle = "#fff";
+  ctx.font = "30px sans-serif";
+  ctx.fillText(user.username, 250, 140);
+
   try {
-    await rest.put(
-      Routes.applicationGuildCommands(
-        process.env.CLIENT_ID,
-        process.env.GUILD_ID
-      ),
-      { body: commands }
-    );
-    console.log("✅ Slash commands deployed");
-  } catch (err) {
-    console.error("❌ Command deploy failed:", err);
-  }
+    const avatar = await loadImage(user.displayAvatarURL({ extension:"png" }));
+    ctx.drawImage(avatar, 50, 75, 150, 150);
+  } catch {}
+
+  return canvas.toBuffer();
 }
 
-// =====================
-// READY
-// =====================
+// ===== KEEP ALIVE =====
+const app = express();
+app.get("/", (_, res) => res.send("OK"));
+app.listen(process.env.PORT || 3000);
+
+// ===== READY =====
 client.once("ready", async () => {
-  console.log(`🤖 Logged in as ${client.user.tag}`);
-  await deployCommands();
+  console.log(`🚀 ${client.user.tag}`);
+
+  client.user.setActivity("Ranking editors", { type: ActivityType.Watching });
+
+  const commands = [
+    { name:"submit", description:"Submit edit" },
+    { name:"profile", description:"View rank card" },
+    { name:"leaderboard", description:"Top users" }
+  ];
+
+  const rest = new REST({ version:"10" }).setToken(process.env.DISCORD_TOKEN);
+
+  await rest.put(
+    Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
+    { body: commands }
+  );
 });
 
-// =====================
-// SAFE FETCH FUNCTIONS
-// =====================
-async function getGuild(id) {
-  try {
-    return await client.guilds.fetch(id);
-  } catch (err) {
-    console.error("❌ Guild fetch failed:", err);
-    return null;
-  }
-}
-
-async function getChannel(guild, id) {
-  try {
-    return await guild.channels.fetch(id);
-  } catch (err) {
-    console.error("❌ Channel fetch failed:", err);
-    return null;
-  }
-}
-
-// =====================
-// INTERACTIONS
-// =====================
-client.on("interactionCreate", async (interaction) => {
+// ===== INTERACTIONS =====
+client.on("interactionCreate", async (i) => {
   try {
 
-    // =====================
-    // COMMANDS
-    // =====================
-    if (interaction.isChatInputCommand()) {
+    // ===== PROFILE =====
+    if (i.isChatInputCommand() && i.commandName === "profile") {
+      await i.deferReply();
 
-      if (interaction.commandName === "submit") {
+      const data = await User.findOne({ userId: i.user.id });
+      if (!data) return i.editReply("No profile yet");
 
-        if (cooldown.has(interaction.user.id)) {
-          return interaction.reply({
-            content: "⏳ Wait before submitting again.",
-            flags: 64
-          });
-        }
+      const card = await generateCard(i.user, data.currentRank);
 
-        cooldown.set(interaction.user.id, true);
-        setTimeout(() => cooldown.delete(interaction.user.id), 30000);
-
-        const modal = new ModalBuilder()
-          .setCustomId("submit_modal")
-          .setTitle("Submit Edit");
-
-        const link = new TextInputBuilder()
-          .setCustomId("link")
-          .setLabel("Streamable Link")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true);
-
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(link)
-        );
-
-        return interaction.showModal(modal);
+      if (!card) {
+        return i.editReply(`Rank: ${data.currentRank}`);
       }
 
-      if (interaction.commandName === "rank") {
-        const data = await Submission.findOne({ userId: interaction.user.id });
-
-        return interaction.reply({
-          content: data?.rank ? `🏆 Rank: **${data.rank}**` : "❌ No rank yet.",
-          flags: 64
-        });
-      }
-
-      if (interaction.commandName === "leaderboard") {
-        const data = await Submission.find();
-
-        const sorted = data
-          .filter(x => x.rank)
-          .sort((a, b) => rankOrder.indexOf(b.rank) - rankOrder.indexOf(a.rank))
-          .slice(0, 10);
-
-        const text = sorted.map((x, i) =>
-          `#${i + 1} <@${x.userId}> → ${x.rank}`
-        ).join("\n");
-
-        return interaction.reply({
-          content: `🏆 Leaderboard:\n\n${text || "No data yet."}`,
-          flags: 64
-        });
-      }
+      return i.editReply({
+        files:[new AttachmentBuilder(card,{name:"rank.png"})]
+      });
     }
 
-    // =====================
-    // SUBMIT MODAL
-    // =====================
-    if (interaction.isModalSubmit() && interaction.customId === "submit_modal") {
+    // ===== LEADERBOARD =====
+    if (i.isChatInputCommand() && i.commandName === "leaderboard") {
+      const users = await User.find().sort({ totalSubmissions:-1 }).limit(10);
 
-      const link = interaction.fields.getTextInputValue("link");
+      const text = users.map((u,idx)=>
+        `#${idx+1} <@${u.userId}> - ${u.currentRank}`
+      ).join("\n");
 
-      await Submission.findOneAndUpdate(
-        { userId: interaction.user.id },
-        { link, date: new Date() },
-        { upsert: true }
-      );
+      return i.reply({ content:text || "No data", ephemeral:true });
+    }
 
-      console.log("📥 Submission saved");
+    // ===== SUBMIT =====
+    if (i.isChatInputCommand() && i.commandName === "submit") {
 
-      const guild = await getGuild(process.env.TARGET_GUILD_ID);
-      if (!guild) {
-        return interaction.reply({ content: "❌ Target server not found.", flags: 64 });
+      const cd = CONFIG.COOLDOWNS.get(i.user.id);
+      if (cd && Date.now() < cd) {
+        return i.reply({ content:"⏳ Wait", ephemeral:true });
       }
 
-      const channel = await getChannel(guild, process.env.REVIEW_CHANNEL_ID);
-      if (!channel) {
-        return interaction.reply({ content: "❌ Review channel not found.", flags: 64 });
-      }
+      const modal = new ModalBuilder()
+        .setCustomId("submit_modal")
+        .setTitle("Submit");
 
-      const embed = new EmbedBuilder()
-        .setTitle("📩 New Submission")
-        .setDescription(`👤 <@${interaction.user.id}>\n🔗 ${link}`)
-        .setColor("Blue");
-
-      const buttons = new ActionRowBuilder().addComponents(
-        rankOrder.map(rank =>
-          new ButtonBuilder()
-            .setCustomId(`rank_${rank}_${interaction.user.id}`)
-            .setLabel(rank)
-            .setStyle(ButtonStyle.Primary)
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId("link")
+            .setLabel("Link")
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
         )
       );
 
-      try {
-        await channel.send({ embeds: [embed], components: [buttons] });
-        console.log("✅ Sent to review channel");
-      } catch (err) {
-        console.error("❌ Send failed:", err);
-        return interaction.reply({
-          content: "❌ Cannot send message to review channel.",
-          flags: 64
-        });
-      }
-
-      try {
-        await interaction.user.send("✅ Submission sent!");
-      } catch {
-        console.log("⚠️ Could not DM user");
-      }
-
-      return interaction.reply({ content: "Submitted!", flags: 64 });
+      return i.showModal(modal);
     }
 
-    // =====================
-    // RANK BUTTON
-    // =====================
-    if (interaction.isButton() && interaction.customId.startsWith("rank_")) {
+    // ===== SUBMIT MODAL =====
+    if (i.isModalSubmit() && i.customId === "submit_modal") {
 
-      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-        return interaction.reply({ content: "❌ Admin only.", flags: 64 });
+      const link = i.fields.getTextInputValue("link");
+
+      try { new URL(link); } 
+      catch { return i.reply({ content:"Invalid URL", ephemeral:true }); }
+
+      await User.findOneAndUpdate(
+        { userId:i.user.id },
+        { lastLink:link },
+        { upsert:true }
+      );
+
+      const guild = await client.guilds.fetch(process.env.TARGET_GUILD_ID);
+      const reviewChan = await guild.channels.fetch(process.env.REVIEW_CHANNEL_ID);
+
+      if (!reviewChan) throw new Error("Review channel missing");
+
+      const embed = new EmbedBuilder()
+        .setTitle("Submission")
+        .setDescription(`<@${i.user.id}>\n${link}`);
+
+      const rows = [
+        new ActionRowBuilder().addComponents(
+          CONFIG.RANKS.slice(0,3).map(r=>new ButtonBuilder()
+            .setCustomId(`rank_${r}_${i.user.id}`)
+            .setLabel(r)
+            .setStyle(ButtonStyle.Primary))
+        ),
+        new ActionRowBuilder().addComponents(
+          CONFIG.RANKS.slice(3).map(r=>new ButtonBuilder()
+            .setCustomId(`rank_${r}_${i.user.id}`)
+            .setLabel(r)
+            .setStyle(ButtonStyle.Primary))
+        )
+      ];
+
+      await reviewChan.send({ embeds:[embed], components:rows });
+
+      CONFIG.COOLDOWNS.set(i.user.id, Date.now()+60000);
+
+      return i.reply({ content:"Sent!", ephemeral:true });
+    }
+
+    // ===== BUTTON =====
+    if (i.isButton() && i.customId.startsWith("rank_")) {
+
+      if (!i.member.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
+        return i.reply({ content:"Staff only", ephemeral:true });
       }
 
-      const [_, rank, userId] = interaction.customId.split("_");
+      const [_, rank, userId] = i.customId.split("_");
 
-      await Submission.findOneAndUpdate({ userId }, { rank });
+      if (CONFIG.PROCESSING.has(userId)) {
+        return i.reply({ content:"Processing", ephemeral:true });
+      }
 
-      const user = await client.users.fetch(userId);
+      const existing = await User.findOne({ userId });
+      if (existing?.currentRank !== "Unranked") {
+        return i.reply({ content:"Already ranked", ephemeral:true });
+      }
+
+      const modal = new ModalBuilder()
+        .setCustomId(`final_${rank}_${userId}`)
+        .setTitle(`Rank ${rank}`);
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId("feedback")
+            .setLabel("Feedback")
+            .setStyle(TextInputStyle.Paragraph)
+        )
+      );
+
+      return i.showModal(modal);
+    }
+
+    // ===== FINAL =====
+    if (i.isModalSubmit() && i.customId.startsWith("final_")) {
+
+      await i.deferReply({ ephemeral:true });
+
+      const [_, rank, userId] = i.customId.split("_");
+      const feedback = i.fields.getTextInputValue("feedback");
+
+      CONFIG.PROCESSING.add(userId);
 
       try {
-        await user.send(`🏆 Rank: **${rank}**`);
-      } catch {
-        console.log("⚠️ Could not DM ranked user");
-      }
 
-      return interaction.reply({ content: "✅ Ranked!", flags: 64 });
+        await User.findOneAndUpdate(
+          { userId },
+          {
+            currentRank:rank,
+            $inc:{ totalSubmissions:1 },
+            $push:{ history:{ rank, feedback, staffId:i.user.id } }
+          },
+          { upsert:true }
+        );
+
+        await Staff.findOneAndUpdate(
+          { staffId:i.user.id },
+          { $inc:{ reviewsCount:1 }, lastReview:new Date() },
+          { upsert:true }
+        );
+
+        const guild = await client.guilds.fetch(process.env.TARGET_GUILD_ID);
+        const member = await guild.members.fetch(userId).catch(()=>null);
+
+        if (member) {
+          await member.roles.remove(Object.values(CONFIG.ROLES)).catch(()=>{});
+          if (CONFIG.ROLES[rank]) {
+            await member.roles.add(CONFIG.ROLES[rank]).catch(()=>{});
+          }
+        }
+
+        const resChan = await guild.channels.fetch(process.env.RESULT_CHANNEL_ID);
+        if (!resChan) throw new Error("Result channel missing");
+
+        await resChan.send({
+          embeds:[
+            new EmbedBuilder()
+              .setTitle("Ranked")
+              .setDescription(`<@${userId}> → ${rank}\n${feedback}`)
+              .setColor(CONFIG.COLORS[rank])
+          ]
+        });
+
+        const user = await client.users.fetch(userId).catch(()=>null);
+        if (user) {
+          await user.send(`Rank: ${rank}\n${feedback}`).catch(()=>{});
+        }
+
+        // ✅ disable buttons instead of deleting
+        const disabledRows = i.message.components.map(row => {
+          return new ActionRowBuilder().addComponents(
+            row.components.map(btn => ButtonBuilder.from(btn).setDisabled(true))
+          );
+        });
+
+        await i.message.edit({ components: disabledRows });
+
+        return i.editReply("Done");
+
+      } finally {
+        CONFIG.PROCESSING.delete(userId);
+      }
     }
 
   } catch (err) {
-    console.error("🔥 GLOBAL ERROR:", err);
-
-    if (!interaction.replied) {
-      interaction.reply({ content: "❌ Unexpected error.", flags: 64 }).catch(()=>{});
+    console.error("ERROR:", err);
+    if (!i.replied && !i.deferred) {
+      i.reply({ content:"Error occurred", ephemeral:true }).catch(()=>{});
     }
   }
 });
 
-// =====================
-// LOGIN
-// =====================
 client.login(process.env.DISCORD_TOKEN);
