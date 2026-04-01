@@ -30,12 +30,14 @@ app.listen(process.env.PORT || 3000);
 // =====================
 await mongoose.connect(process.env.MONGO_URI);
 
-const Submission = mongoose.model("Submission", new mongoose.Schema({
+const schema = new mongoose.Schema({
   userId: String,
   link: String,
   rank: String,
   date: Date
-}));
+});
+
+const Submission = mongoose.model("Submission", schema);
 
 // =====================
 // ROLE MAP
@@ -48,8 +50,6 @@ const rankRoles = {
   "SS+": "1488208185633280041",
   "SSS": "1488208025859788860"
 };
-
-const rankOrder = ["A","S","S+","SS","SS+","SSS"];
 
 // =====================
 // CLIENT
@@ -70,13 +70,18 @@ const commands = [
 const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
 
 async function deployCommands() {
-  await rest.put(
-    Routes.applicationGuildCommands(
-      process.env.CLIENT_ID,
-      process.env.GUILD_ID
-    ),
-    { body: commands }
-  );
+  try {
+    await rest.put(
+      Routes.applicationGuildCommands(
+        process.env.CLIENT_ID,
+        process.env.GUILD_ID
+      ),
+      { body: commands }
+    );
+    console.log("✅ Commands deployed");
+  } catch (err) {
+    console.error(err);
+  }
 }
 
 client.once("ready", async () => {
@@ -85,9 +90,9 @@ client.once("ready", async () => {
 });
 
 // =====================
-// COOLDOWN
+// RANK ORDER
 // =====================
-const cooldown = new Map();
+const rankOrder = ["A","S","S+","SS","SS+","SSS"];
 
 // =====================
 // INTERACTIONS
@@ -95,16 +100,39 @@ const cooldown = new Map();
 client.on("interactionCreate", async (interaction) => {
   try {
 
+    // =====================
+    // COMMANDS
+    // =====================
     if (interaction.isChatInputCommand()) {
 
-      if (interaction.commandName === "submit") {
+      if (interaction.commandName === "rank") {
+        const data = await Submission.findOne({ userId: interaction.user.id });
 
-        if (cooldown.has(interaction.user.id)) {
-          return interaction.reply({ content: "⏳ Wait before submitting again.", flags: 64 });
+        if (!data || !data.rank) {
+          return interaction.reply({ content: "❌ No rank yet.", flags: 64 });
         }
 
-        cooldown.set(interaction.user.id, true);
-        setTimeout(() => cooldown.delete(interaction.user.id), 30000);
+        return interaction.reply(`🏆 Your rank: **${data.rank}**`);
+      }
+
+      if (interaction.commandName === "leaderboard") {
+        const data = await Submission.find();
+
+        const sorted = data
+          .filter(x => x.rank)
+          .sort((a, b) =>
+            rankOrder.indexOf(b.rank) - rankOrder.indexOf(a.rank)
+          )
+          .slice(0, 10);
+
+        const text = sorted.map((x, i) =>
+          `#${i + 1} <@${x.userId}> → ${x.rank}`
+        ).join("\n");
+
+        return interaction.reply(`🏆 Leaderboard:\n\n${text || "No data yet."}`);
+      }
+
+      if (interaction.commandName === "submit") {
 
         const modal = new ModalBuilder()
           .setCustomId("submit_modal")
@@ -116,40 +144,16 @@ client.on("interactionCreate", async (interaction) => {
           .setStyle(TextInputStyle.Short)
           .setRequired(true);
 
-        modal.addComponents(new ActionRowBuilder().addComponents(link));
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(link)
+        );
 
         return interaction.showModal(modal);
-      }
-
-      if (interaction.commandName === "rank") {
-        const data = await Submission.findOne({ userId: interaction.user.id });
-        return interaction.reply({
-          content: data?.rank ? `🏆 Rank: **${data.rank}**` : "❌ No rank yet.",
-          flags: 64
-        });
-      }
-
-      if (interaction.commandName === "leaderboard") {
-        const data = await Submission.find();
-
-        const sorted = data
-          .filter(x => x.rank)
-          .sort((a, b) => rankOrder.indexOf(b.rank) - rankOrder.indexOf(a.rank))
-          .slice(0, 10);
-
-        const text = sorted.map((x, i) =>
-          `#${i + 1} <@${x.userId}> → ${x.rank}`
-        ).join("\n");
-
-        return interaction.reply({
-          content: `🏆 Leaderboard:\n\n${text || "No data yet."}`,
-          flags: 64
-        });
       }
     }
 
     // =====================
-    // SUBMIT MODAL
+    // MODAL SUBMIT
     // =====================
     if (interaction.isModalSubmit() && interaction.customId === "submit_modal") {
 
@@ -161,19 +165,19 @@ client.on("interactionCreate", async (interaction) => {
         { upsert: true }
       );
 
-      // 🔥 DEBUG CHANNEL FETCH
+      // 🔥 FIXED CROSS SERVER CHANNEL FETCH
       let channel;
 
       try {
-        channel = await client.channels.fetch(process.env.REVIEW_CHANNEL_ID);
-        console.log("✅ Channel found:", channel?.name);
+        const guild = await client.guilds.fetch(process.env.TARGET_GUILD_ID);
+        channel = await guild.channels.fetch(process.env.REVIEW_CHANNEL_ID);
       } catch (err) {
-        console.error("❌ Channel fetch failed:", err);
+        console.error("Channel error:", err);
       }
 
       if (!channel) {
         return interaction.reply({
-          content: "❌ Bot cannot access review channel. Check invite + permissions.",
+          content: "❌ Bot cannot access review channel.",
           flags: 64
         });
       }
@@ -192,16 +196,7 @@ client.on("interactionCreate", async (interaction) => {
         )
       );
 
-      try {
-        await channel.send({ embeds: [embed], components: [buttons] });
-        console.log("✅ Sent to review channel");
-      } catch (err) {
-        console.error("❌ Send failed:", err);
-        return interaction.reply({
-          content: "❌ Cannot send message. Check permissions.",
-          flags: 64
-        });
-      }
+      await channel.send({ embeds: [embed], components: [buttons] });
 
       await interaction.user.send("✅ Submission sent!");
       return interaction.reply({ content: "Submitted!", flags: 64 });
@@ -220,53 +215,20 @@ client.on("interactionCreate", async (interaction) => {
 
       await Submission.findOneAndUpdate({ userId }, { rank });
 
-      const modal = new ModalBuilder()
-        .setCustomId(`feedback_${userId}_${rank}`)
-        .setTitle(`Rank: ${rank}`);
-
-      const input = new TextInputBuilder()
-        .setCustomId("msg")
-        .setLabel("Feedback")
-        .setStyle(TextInputStyle.Paragraph);
-
-      modal.addComponents(new ActionRowBuilder().addComponents(input));
-
-      return interaction.showModal(modal);
-    }
-
-    // =====================
-    // FINAL FEEDBACK
-    // =====================
-    if (interaction.isModalSubmit() && interaction.customId.startsWith("feedback_")) {
-
-      const [_, userId, rank] = interaction.customId.split("_");
-      const msg = interaction.fields.getTextInputValue("msg");
-
       const user = await client.users.fetch(userId);
-      const guild = await client.guilds.fetch(process.env.GUILD_ID);
-      const member = await guild.members.fetch(userId);
 
-      await member.roles.remove(Object.values(rankRoles)).catch(() => {});
-      if (rankRoles[rank]) await member.roles.add(rankRoles[rank]).catch(() => {});
+      await user.send(`🏆 Rank: **${rank}**`);
 
-      await user.send(`🏆 Rank: **${rank}**\n\n💬 ${msg}`);
-
-      const resultChannel = await client.channels.fetch(process.env.RESULT_CHANNEL_ID);
-
-      const embed = new EmbedBuilder()
-        .setTitle("🏆 Ranked Result")
-        .setDescription(`<@${userId}> → **${rank}**\n\n💬 ${msg}`)
-        .setColor("Green");
-
-      await resultChannel.send({ embeds: [embed] });
-
-      return interaction.reply({ content: "✅ Done!", flags: 64 });
+      return interaction.reply({ content: "✅ Ranked!", flags: 64 });
     }
 
   } catch (err) {
-    console.error("🔥 GLOBAL ERROR:", err);
-    if (!interaction.replied) {
-      interaction.reply({ content: "❌ Internal error.", flags: 64 });
+    console.error("❌ ERROR:", err);
+
+    if (interaction.replied || interaction.deferred) {
+      interaction.followUp({ content: "❌ Error occurred.", flags: 64 }).catch(()=>{});
+    } else {
+      interaction.reply({ content: "❌ Error occurred.", flags: 64 }).catch(()=>{});
     }
   }
 });
