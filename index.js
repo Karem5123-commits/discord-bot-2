@@ -30,14 +30,12 @@ app.listen(process.env.PORT || 3000);
 // =====================
 await mongoose.connect(process.env.MONGO_URI);
 
-const schema = new mongoose.Schema({
+const Submission = mongoose.model("Submission", new mongoose.Schema({
   userId: String,
   link: String,
   rank: String,
   date: Date
-});
-
-const Submission = mongoose.model("Submission", schema);
+}));
 
 // =====================
 // ROLE MAP
@@ -51,9 +49,6 @@ const rankRoles = {
   "SSS": "1488208025859788860"
 };
 
-// =====================
-// RANK ORDER
-// =====================
 const rankOrder = ["A","S","S+","SS","SS+","SSS"];
 
 // =====================
@@ -69,24 +64,14 @@ const client = new Client({
 const commands = [
   { name: "submit", description: "Submit your edit" },
   { name: "rank", description: "Check your rank" },
-  { name: "leaderboard", description: "Top ranked users" },
-  { name: "resubmit", description: "Update your submission" }
+  { name: "leaderboard", description: "Top ranked users" }
 ];
 
 const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
 
-// =====================
-// AUTO DEPLOY COMMANDS
-// =====================
+// AUTO DEPLOY
 async function deployCommands() {
-  if (!process.env.CLIENT_ID || !process.env.GUILD_ID) {
-    console.error("❌ Missing CLIENT_ID or GUILD_ID");
-    return;
-  }
-
   try {
-    console.log("🔄 Updating slash commands...");
-
     await rest.put(
       Routes.applicationGuildCommands(
         process.env.CLIENT_ID,
@@ -94,110 +79,79 @@ async function deployCommands() {
       ),
       { body: commands }
     );
-
-    console.log("✅ Commands updated!");
+    console.log("✅ Commands deployed");
   } catch (err) {
-    console.error("❌ Command update failed:", err);
+    console.error("❌ Command error:", err);
   }
 }
 
-// =====================
-// READY
-// =====================
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  console.log("CHANNEL_ID:", process.env.CHANNEL_ID);
   await deployCommands();
 });
-
-// =====================
-// COOLDOWN
-// =====================
-const cooldown = new Map();
 
 // =====================
 // INTERACTIONS
 // =====================
 client.on("interactionCreate", async (interaction) => {
 
-  // =====================
-  // COMMANDS
-  // =====================
-  if (interaction.isChatInputCommand()) {
+  try {
 
-    // RANK
-    if (interaction.commandName === "rank") {
-      const data = await Submission.findOne({ userId: interaction.user.id });
+    // =====================
+    // SLASH COMMANDS
+    // =====================
+    if (interaction.isChatInputCommand()) {
 
-      if (!data || !data.rank) {
-        return interaction.reply("❌ No rank yet.");
+      if (interaction.commandName === "rank") {
+        const data = await Submission.findOne({ userId: interaction.user.id });
+        return interaction.reply(
+          data?.rank ? `🏆 Rank: **${data.rank}**` : "❌ No rank yet."
+        );
       }
 
-      return interaction.reply(`🏆 Your rank: **${data.rank}**`);
-    }
+      if (interaction.commandName === "leaderboard") {
+        const data = await Submission.find();
 
-    // LEADERBOARD
-    if (interaction.commandName === "leaderboard") {
-      const data = await Submission.find();
+        const sorted = data
+          .filter(x => x.rank)
+          .sort((a, b) =>
+            rankOrder.indexOf(b.rank) - rankOrder.indexOf(a.rank)
+          )
+          .slice(0, 10);
 
-      const sorted = data
-        .filter(x => x.rank)
-        .sort((a, b) =>
-          rankOrder.indexOf(b.rank) - rankOrder.indexOf(a.rank)
-        )
-        .slice(0, 10);
+        const text = sorted.map((x, i) =>
+          `#${i + 1} <@${x.userId}> → ${x.rank}`
+        ).join("\n");
 
-      const text = sorted.map((x, i) =>
-        `#${i + 1} <@${x.userId}> → ${x.rank}`
-      ).join("\n");
-
-      return interaction.reply(`🏆 Leaderboard:\n\n${text || "No data yet."}`);
-    }
-
-    // SUBMIT / RESUBMIT
-    if (interaction.commandName === "submit" || interaction.commandName === "resubmit") {
-
-      if (cooldown.has(interaction.user.id)) {
-        return interaction.reply({
-          content: "⏳ Wait before submitting again.",
-          ephemeral: true
-        });
+        return interaction.reply(`🏆 Leaderboard:\n\n${text || "No data yet."}`);
       }
 
-      cooldown.set(interaction.user.id, true);
-      setTimeout(() => cooldown.delete(interaction.user.id), 30000);
+      if (interaction.commandName === "submit") {
 
-      const modal = new ModalBuilder()
-        .setCustomId("submit_modal")
-        .setTitle("Submit Edit");
+        const modal = new ModalBuilder()
+          .setCustomId("submit_modal")
+          .setTitle("Submit Edit");
 
-      const link = new TextInputBuilder()
-        .setCustomId("link")
-        .setLabel("Streamable Link")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
+        const link = new TextInputBuilder()
+          .setCustomId("link")
+          .setLabel("Streamable Link")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true);
 
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(link)
-      );
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(link)
+        );
 
-      return interaction.showModal(modal);
+        return interaction.showModal(modal);
+      }
     }
-  }
 
-  // =====================
-  // MODAL SUBMIT (FIXED)
-  // =====================
-  if (interaction.isModalSubmit() && interaction.customId === "submit_modal") {
-    try {
+    // =====================
+    // MODAL SUBMIT
+    // =====================
+    if (interaction.isModalSubmit() && interaction.customId === "submit_modal") {
+
       const link = interaction.fields.getTextInputValue("link");
-
-      if (!link || !link.startsWith("http")) {
-        return interaction.reply({
-          content: "❌ Invalid link.",
-          ephemeral: true
-        });
-      }
 
       await Submission.findOneAndUpdate(
         { userId: interaction.user.id },
@@ -205,24 +159,12 @@ client.on("interactionCreate", async (interaction) => {
         { upsert: true }
       );
 
-      const channelId = process.env.CHANNEL_ID;
-
-      if (!channelId) {
-        console.error("❌ CHANNEL_ID missing");
-        return interaction.reply({
-          content: "❌ Bot setup error.",
-          ephemeral: true
-        });
-      }
-
-      const channel = await client.channels.fetch(channelId).catch(() => null);
-
-      if (!channel) {
-        console.error("❌ Invalid CHANNEL_ID");
-        return interaction.reply({
-          content: "❌ Channel not found.",
-          ephemeral: true
-        });
+      // SAFE CHANNEL FETCH
+      let channel;
+      try {
+        channel = await client.channels.fetch(process.env.CHANNEL_ID);
+      } catch {
+        channel = null;
       }
 
       const embed = new EmbedBuilder()
@@ -239,79 +181,101 @@ client.on("interactionCreate", async (interaction) => {
         )
       );
 
-      await channel.send({ embeds: [embed], components: [buttons] });
+      // TRY SEND TO CHANNEL
+      if (channel) {
+        try {
+          await channel.send({ embeds: [embed], components: [buttons] });
+        } catch (err) {
+          console.error("❌ Channel send failed:", err);
+        }
+      }
+
+      // ALWAYS DM USER
+      try {
+        await interaction.user.send("✅ Submission received!");
+      } catch {}
 
       return interaction.reply({
         content: "✅ Submitted!",
         ephemeral: true
       });
-
-    } catch (err) {
-      console.error("❌ SUBMIT ERROR:", err);
-
-      return interaction.reply({
-        content: "❌ Internal error. Check logs.",
-        ephemeral: true
-      });
-    }
-  }
-
-  // =====================
-  // RANK BUTTON
-  // =====================
-  if (interaction.isButton() && interaction.customId.startsWith("rank_")) {
-
-    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-      return interaction.reply({ content: "❌ Admin only.", ephemeral: true });
     }
 
-    const [_, rank, userId] = interaction.customId.split("_");
+    // =====================
+    // RANK BUTTON
+    // =====================
+    if (interaction.isButton() && interaction.customId.startsWith("rank_")) {
 
-    await Submission.findOneAndUpdate({ userId }, { rank });
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        return interaction.reply({ content: "❌ Admin only.", ephemeral: true });
+      }
 
-    const modal = new ModalBuilder()
-      .setCustomId(`feedback_${userId}_${rank}`)
-      .setTitle(`Rank: ${rank}`);
+      const [_, rank, userId] = interaction.customId.split("_");
 
-    const input = new TextInputBuilder()
-      .setCustomId("msg")
-      .setLabel("Feedback")
-      .setStyle(TextInputStyle.Paragraph);
+      await Submission.findOneAndUpdate({ userId }, { rank });
 
-    modal.addComponents(new ActionRowBuilder().addComponents(input));
+      const modal = new ModalBuilder()
+        .setCustomId(`feedback_${userId}_${rank}`)
+        .setTitle(`Rank: ${rank}`);
 
-    return interaction.showModal(modal);
-  }
+      const input = new TextInputBuilder()
+        .setCustomId("msg")
+        .setLabel("Feedback")
+        .setStyle(TextInputStyle.Paragraph);
 
-  // =====================
-  // FINAL FEEDBACK
-  // =====================
-  if (interaction.isModalSubmit() && interaction.customId.startsWith("feedback_")) {
+      modal.addComponents(new ActionRowBuilder().addComponents(input));
 
-    const [_, userId, rank] = interaction.customId.split("_");
-    const msg = interaction.fields.getTextInputValue("msg");
+      return interaction.showModal(modal);
+    }
 
-    const user = await client.users.fetch(userId);
-    const guild = await client.guilds.fetch(process.env.GUILD_ID);
-    const member = await guild.members.fetch(userId);
+    // =====================
+    // FEEDBACK MODAL
+    // =====================
+    if (interaction.isModalSubmit() && interaction.customId.startsWith("feedback_")) {
 
-    await member.roles.remove(Object.values(rankRoles)).catch(() => {});
+      const [_, userId, rank] = interaction.customId.split("_");
+      const msg = interaction.fields.getTextInputValue("msg");
 
-    const roleId = rankRoles[rank];
-    if (roleId) await member.roles.add(roleId).catch(() => {});
+      const user = await client.users.fetch(userId);
+      const guild = await client.guilds.fetch(process.env.GUILD_ID);
+      const member = await guild.members.fetch(userId);
 
-    await user.send(`🏆 Rank: **${rank}**\n\n💬 ${msg}`);
+      // REMOVE OLD ROLES
+      await member.roles.remove(Object.values(rankRoles)).catch(() => {});
 
-    const resultChannel = await client.channels.fetch(process.env.RESULT_CHANNEL_ID);
+      // ADD NEW ROLE
+      const roleId = rankRoles[rank];
+      if (roleId) await member.roles.add(roleId).catch(() => {});
 
-    const embed = new EmbedBuilder()
-      .setTitle("🏆 Ranked Result")
-      .setDescription(`<@${userId}> → **${rank}**\n\n💬 ${msg}`)
-      .setColor("Green");
+      // DM USER
+      await user.send(`🏆 Rank: **${rank}**\n\n💬 ${msg}`);
 
-    await resultChannel.send({ embeds: [embed] });
+      // SAFE RESULT CHANNEL
+      try {
+        const resultChannel = await client.channels.fetch(process.env.RESULT_CHANNEL_ID);
 
-    return interaction.reply({ content: "✅ Done!", ephemeral: true });
+        const embed = new EmbedBuilder()
+          .setTitle("🏆 Ranked Result")
+          .setDescription(`<@${userId}> → **${rank}**\n\n💬 ${msg}`)
+          .setColor("Green");
+
+        await resultChannel.send({ embeds: [embed] });
+
+      } catch (err) {
+        console.error("❌ Result channel failed:", err);
+      }
+
+      return interaction.reply({ content: "✅ Done!", ephemeral: true });
+    }
+
+  } catch (err) {
+    console.error("🔥 ERROR:", err);
+
+    if (interaction.replied || interaction.deferred) {
+      interaction.followUp({ content: "❌ Something broke.", ephemeral: true });
+    } else {
+      interaction.reply({ content: "❌ Internal error.", ephemeral: true });
+    }
   }
 
 });
