@@ -19,7 +19,7 @@ import {
 dotenv.config();
 
 // =====================
-// KEEP ALIVE (RENDER)
+// KEEP ALIVE (Render)
 // =====================
 const app = express();
 app.get("/", (req, res) => res.send("Bot running"));
@@ -33,7 +33,6 @@ await mongoose.connect(process.env.MONGO_URI);
 const schema = new mongoose.Schema({
   userId: String,
   link: String,
-  proof: String,
   rank: String,
   date: Date
 });
@@ -56,12 +55,7 @@ const rankRoles = {
 // CLIENT
 // =====================
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
 });
 
 // =====================
@@ -76,13 +70,9 @@ const commands = [
 
 const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
 
-// =====================
-// AUTO REGISTER COMMANDS
-// =====================
+// AUTO DEPLOY COMMANDS
 async function deployCommands() {
   try {
-    console.log("🔄 Updating slash commands...");
-
     await rest.put(
       Routes.applicationGuildCommands(
         process.env.CLIENT_ID,
@@ -90,10 +80,9 @@ async function deployCommands() {
       ),
       { body: commands }
     );
-
     console.log("✅ Commands updated!");
   } catch (err) {
-    console.error("❌ Command update failed:", err);
+    console.error("❌ Command error:", err);
   }
 }
 
@@ -116,32 +105,13 @@ const cooldown = new Map();
 const rankOrder = ["A","S","S+","SS","SS+","SSS"];
 
 // =====================
-// FILE UPLOAD HANDLER
-// =====================
-client.on("messageCreate", async (message) => {
-  if (message.author.bot) return;
-
-  if (!cooldown.has(message.author.id)) return;
-
-  if (message.attachments.size > 0) {
-    const file = message.attachments.first().url;
-
-    await Submission.findOneAndUpdate(
-      { userId: message.author.id },
-      { proof: file },
-      { upsert: true }
-    );
-
-    await message.reply("✅ File proof received!");
-  }
-});
-
-// =====================
 // INTERACTIONS
 // =====================
 client.on("interactionCreate", async (interaction) => {
 
+  // =====================
   // COMMANDS
+  // =====================
   if (interaction.isChatInputCommand()) {
 
     // RANK
@@ -192,32 +162,36 @@ client.on("interactionCreate", async (interaction) => {
 
       const link = new TextInputBuilder()
         .setCustomId("link")
-        .setLabel("Streamable Link")
-        .setStyle(TextInputStyle.Short);
-
-      const proof = new TextInputBuilder()
-        .setCustomId("proof")
-        .setLabel("Proof link (YouTube, Drive, etc)")
-        .setStyle(TextInputStyle.Short);
+        .setLabel("Streamable Link ONLY")
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder("https://streamable.com/xxxx");
 
       modal.addComponents(
-        new ActionRowBuilder().addComponents(link),
-        new ActionRowBuilder().addComponents(proof)
+        new ActionRowBuilder().addComponents(link)
       );
 
       return interaction.showModal(modal);
     }
   }
 
-  // MODAL SUBMIT
+  // =====================
+  // SUBMIT MODAL
+  // =====================
   if (interaction.isModalSubmit() && interaction.customId === "submit_modal") {
 
     const link = interaction.fields.getTextInputValue("link");
-    const proof = interaction.fields.getTextInputValue("proof");
+
+    // simple validation
+    if (!link.includes("streamable.com")) {
+      return interaction.reply({
+        content: "❌ Must be a Streamable link.",
+        ephemeral: true
+      });
+    }
 
     await Submission.findOneAndUpdate(
       { userId: interaction.user.id },
-      { link, proof, date: new Date() },
+      { link, date: new Date() },
       { upsert: true }
     );
 
@@ -225,7 +199,7 @@ client.on("interactionCreate", async (interaction) => {
 
     const embed = new EmbedBuilder()
       .setTitle("📩 New Submission")
-      .setDescription(`👤 <@${interaction.user.id}>\n🔗 ${link}\n📸 ${proof || "Check attachments"}`)
+      .setDescription(`👤 <@${interaction.user.id}>\n🔗 ${link}`)
       .setColor("Blue");
 
     const buttons = new ActionRowBuilder().addComponents(
@@ -239,14 +213,13 @@ client.on("interactionCreate", async (interaction) => {
 
     await channel.send({ embeds: [embed], components: [buttons] });
 
-    await interaction.user.send(
-      "✅ Submission sent!\n\n📌 You can also upload a FILE here as proof if needed."
-    );
-
+    await interaction.user.send("✅ Submission sent!");
     return interaction.reply({ content: "Submitted!", ephemeral: true });
   }
 
+  // =====================
   // RANK BUTTON
+  // =====================
   if (interaction.isButton() && interaction.customId.startsWith("rank_")) {
 
     if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
@@ -263,7 +236,7 @@ client.on("interactionCreate", async (interaction) => {
 
     const input = new TextInputBuilder()
       .setCustomId("msg")
-      .setLabel("Feedback")
+      .setLabel("Feedback message")
       .setStyle(TextInputStyle.Paragraph);
 
     modal.addComponents(new ActionRowBuilder().addComponents(input));
@@ -271,7 +244,9 @@ client.on("interactionCreate", async (interaction) => {
     return interaction.showModal(modal);
   }
 
+  // =====================
   // FINAL FEEDBACK
+  // =====================
   if (interaction.isModalSubmit() && interaction.customId.startsWith("feedback_")) {
 
     const [_, userId, rank] = interaction.customId.split("_");
