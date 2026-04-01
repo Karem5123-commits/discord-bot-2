@@ -1,8 +1,14 @@
 {
-  "name": "apex-ultra",
-  "version": "2.0.0",
+  "name": "apex-ultra-v3",
+  "version": "3.0.0",
   "type": "module",
-  "scripts": { "start": "node index.js" },
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "dependencies": {
     "discord.js": "^14.14.1",
     "dotenv": "^16.4.5",
