@@ -1,45 +1,29 @@
-import { REST, Routes, SlashCommandBuilder } from "discord.js";
-import dotenv from "dotenv";
-
-dotenv.config();
+const { REST, Routes } = require('discord.js');
 
 const commands = [
-  new SlashCommandBuilder()
-    .setName("setup")
-    .setDescription("Setup the bot panel"),
-
-  new SlashCommandBuilder()
-    .setName("kick")
-    .setDescription("Kick a user")
-    .addUserOption(option =>
-      option.setName("user").setDescription("User to kick").setRequired(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName("ban")
-    .setDescription("Ban a user")
-    .addUserOption(option =>
-      option.setName("user").setDescription("User to ban").setRequired(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName("ping")
-    .setDescription("Check bot status")
+  {
+    name: 'ping',
+    description: 'Replies with Pong!',
+  },
+  // add your other commands here
 ];
 
-const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
+const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
 
-(async () => {
+async function deployCommands() {
   try {
-    console.log("🚀 Registering slash commands...");
+    console.log('🔄 Refreshing slash commands...');
 
     await rest.put(
-      Routes.applicationCommands(process.env.CLIENT_ID),
+      Routes.applicationGuildCommands(
+        process.env.CLIENT_ID,
+        process.env.GUILD_ID
+      ),
       { body: commands }
     );
 
-    console.log("✅ Slash commands registered!");
+    console.log('✅ Commands updated!');
   } catch (error) {
     console.error(error);
   }
-})();
+}
