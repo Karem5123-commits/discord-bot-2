@@ -19,7 +19,7 @@ import {
 dotenv.config();
 
 // =====================
-// KEEP ALIVE (RENDER)
+// KEEP ALIVE
 // =====================
 const app = express();
 app.get("/", (req, res) => res.send("Bot running"));
@@ -69,20 +69,14 @@ const commands = [
 
 const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
 
-// AUTO DEPLOY
 async function deployCommands() {
-  try {
-    await rest.put(
-      Routes.applicationGuildCommands(
-        process.env.CLIENT_ID,
-        process.env.GUILD_ID
-      ),
-      { body: commands }
-    );
-    console.log("✅ Commands deployed");
-  } catch (err) {
-    console.error("❌ Command error:", err);
-  }
+  await rest.put(
+    Routes.applicationGuildCommands(
+      process.env.CLIENT_ID,
+      process.env.GUILD_ID
+    ),
+    { body: commands }
+  );
 }
 
 client.once("ready", async () => {
@@ -91,14 +85,18 @@ client.once("ready", async () => {
 });
 
 // =====================
+// COOLDOWN
+// =====================
+const cooldown = new Map();
+
+// =====================
 // INTERACTIONS
 // =====================
 client.on("interactionCreate", async (interaction) => {
-
   try {
 
     // =====================
-    // SLASH COMMANDS
+    // COMMANDS
     // =====================
     if (interaction.isChatInputCommand()) {
 
@@ -128,6 +126,16 @@ client.on("interactionCreate", async (interaction) => {
 
       if (interaction.commandName === "submit") {
 
+        if (cooldown.has(interaction.user.id)) {
+          return interaction.reply({
+            content: "⏳ Wait before submitting again.",
+            ephemeral: true
+          });
+        }
+
+        cooldown.set(interaction.user.id, true);
+        setTimeout(() => cooldown.delete(interaction.user.id), 30000);
+
         const modal = new ModalBuilder()
           .setCustomId("submit_modal")
           .setTitle("Submit Edit");
@@ -135,8 +143,7 @@ client.on("interactionCreate", async (interaction) => {
         const link = new TextInputBuilder()
           .setCustomId("link")
           .setLabel("Streamable Link")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true);
+          .setStyle(TextInputStyle.Short);
 
         modal.addComponents(
           new ActionRowBuilder().addComponents(link)
@@ -147,7 +154,7 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     // =====================
-    // MODAL SUBMIT
+    // SUBMIT MODAL
     // =====================
     if (interaction.isModalSubmit() && interaction.customId === "submit_modal") {
 
@@ -159,12 +166,18 @@ client.on("interactionCreate", async (interaction) => {
         { upsert: true }
       );
 
-      // SAFE CHANNEL FETCH
       let channel;
+
       try {
-        channel = await client.channels.fetch(process.env.CHANNEL_ID);
-      } catch {
-        channel = null;
+        const guild = await client.guilds.fetch(process.env.TARGET_GUILD_ID);
+        channel = await guild.channels.fetch(process.env.TARGET_CHANNEL_ID);
+      } catch (err) {
+        console.error("❌ Fetch error:", err);
+      }
+
+      if (!channel || !channel.isTextBased()) {
+        console.log("⚠️ Using fallback channel");
+        channel = interaction.channel;
       }
 
       const embed = new EmbedBuilder()
@@ -181,21 +194,9 @@ client.on("interactionCreate", async (interaction) => {
         )
       );
 
-      // TRY SEND TO CHANNEL
-      if (channel) {
-        try {
-          await channel.send({ embeds: [embed], components: [buttons] });
-        } catch (err) {
-          console.error("❌ Channel send failed:", err);
-        }
-      }
+      await channel.send({ embeds: [embed], components: [buttons] });
 
-      // ALWAYS DM USER
-      try {
-        await interaction.user.send("✅ Submission received!");
-      } catch {}
-
-      return interaction.reply({
+      await interaction.reply({
         content: "✅ Submitted!",
         ephemeral: true
       });
@@ -229,7 +230,7 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     // =====================
-    // FEEDBACK MODAL
+    // FEEDBACK
     // =====================
     if (interaction.isModalSubmit() && interaction.customId.startsWith("feedback_")) {
 
@@ -240,17 +241,11 @@ client.on("interactionCreate", async (interaction) => {
       const guild = await client.guilds.fetch(process.env.GUILD_ID);
       const member = await guild.members.fetch(userId);
 
-      // REMOVE OLD ROLES
       await member.roles.remove(Object.values(rankRoles)).catch(() => {});
+      if (rankRoles[rank]) await member.roles.add(rankRoles[rank]).catch(() => {});
 
-      // ADD NEW ROLE
-      const roleId = rankRoles[rank];
-      if (roleId) await member.roles.add(roleId).catch(() => {});
-
-      // DM USER
       await user.send(`🏆 Rank: **${rank}**\n\n💬 ${msg}`);
 
-      // SAFE RESULT CHANNEL
       try {
         const resultChannel = await client.channels.fetch(process.env.RESULT_CHANNEL_ID);
 
@@ -260,9 +255,8 @@ client.on("interactionCreate", async (interaction) => {
           .setColor("Green");
 
         await resultChannel.send({ embeds: [embed] });
-
       } catch (err) {
-        console.error("❌ Result channel failed:", err);
+        console.error("❌ Result channel error:", err);
       }
 
       return interaction.reply({ content: "✅ Done!", ephemeral: true });
@@ -270,14 +264,10 @@ client.on("interactionCreate", async (interaction) => {
 
   } catch (err) {
     console.error("🔥 ERROR:", err);
-
-    if (interaction.replied || interaction.deferred) {
-      interaction.followUp({ content: "❌ Something broke.", ephemeral: true });
-    } else {
-      interaction.reply({ content: "❌ Internal error.", ephemeral: true });
+    if (!interaction.replied) {
+      interaction.reply({ content: "❌ Error occurred.", ephemeral: true });
     }
   }
-
 });
 
 // =====================
