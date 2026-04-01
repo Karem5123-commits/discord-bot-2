@@ -19,7 +19,7 @@ import {
 dotenv.config();
 
 // =====================
-// KEEP ALIVE (Render)
+// KEEP ALIVE (RENDER)
 // =====================
 const app = express();
 app.get("/", (req, res) => res.send("Bot running"));
@@ -70,9 +70,13 @@ const commands = [
 
 const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
 
+// =====================
 // AUTO DEPLOY COMMANDS
+// =====================
 async function deployCommands() {
   try {
+    console.log("🔄 Updating slash commands...");
+
     await rest.put(
       Routes.applicationGuildCommands(
         process.env.CLIENT_ID,
@@ -80,14 +84,15 @@ async function deployCommands() {
       ),
       { body: commands }
     );
+
     console.log("✅ Commands updated!");
   } catch (err) {
-    console.error("❌ Command error:", err);
+    console.error("❌ Command update failed:", err);
   }
 }
 
 // =====================
-// READY
+// READY EVENT
 // =====================
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
@@ -114,7 +119,7 @@ client.on("interactionCreate", async (interaction) => {
   // =====================
   if (interaction.isChatInputCommand()) {
 
-    // RANK
+    // CHECK RANK
     if (interaction.commandName === "rank") {
       const data = await Submission.findOne({ userId: interaction.user.id });
 
@@ -162,9 +167,8 @@ client.on("interactionCreate", async (interaction) => {
 
       const link = new TextInputBuilder()
         .setCustomId("link")
-        .setLabel("Streamable Link ONLY")
-        .setStyle(TextInputStyle.Short)
-        .setPlaceholder("https://streamable.com/xxxx");
+        .setLabel("Streamable Link")
+        .setStyle(TextInputStyle.Short);
 
       modal.addComponents(
         new ActionRowBuilder().addComponents(link)
@@ -175,19 +179,11 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   // =====================
-  // SUBMIT MODAL
-  // =====================
+  // SUBMIT MODAL (FIXED)
+// =====================
   if (interaction.isModalSubmit() && interaction.customId === "submit_modal") {
 
     const link = interaction.fields.getTextInputValue("link");
-
-    // simple validation
-    if (!link.includes("streamable.com")) {
-      return interaction.reply({
-        content: "❌ Must be a Streamable link.",
-        ephemeral: true
-      });
-    }
 
     await Submission.findOneAndUpdate(
       { userId: interaction.user.id },
@@ -236,7 +232,7 @@ client.on("interactionCreate", async (interaction) => {
 
     const input = new TextInputBuilder()
       .setCustomId("msg")
-      .setLabel("Feedback message")
+      .setLabel("Feedback")
       .setStyle(TextInputStyle.Paragraph);
 
     modal.addComponents(new ActionRowBuilder().addComponents(input));
@@ -256,13 +252,17 @@ client.on("interactionCreate", async (interaction) => {
     const guild = await client.guilds.fetch(process.env.GUILD_ID);
     const member = await guild.members.fetch(userId);
 
+    // REMOVE OLD ROLES
     await member.roles.remove(Object.values(rankRoles)).catch(() => {});
 
+    // ADD NEW ROLE
     const roleId = rankRoles[rank];
     if (roleId) await member.roles.add(roleId).catch(() => {});
 
+    // DM USER
     await user.send(`🏆 Rank: **${rank}**\n\n💬 ${msg}`);
 
+    // SEND RESULT CHANNEL
     const resultChannel = await client.channels.fetch(process.env.RESULT_CHANNEL_ID);
 
     const embed = new EmbedBuilder()
