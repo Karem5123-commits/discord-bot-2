@@ -19,7 +19,7 @@ import {
 dotenv.config();
 
 // =====================
-// KEEP ALIVE
+// KEEP ALIVE (RENDER)
 // =====================
 const app = express();
 app.get("/", (req, res) => res.send("Bot running"));
@@ -52,13 +52,16 @@ const rankRoles = {
   "SSS": "1488208025859788860"
 };
 
-const rankOrder = ["A","S","S+","SS","SS+","SSS"];
-
 // =====================
 // CLIENT
 // =====================
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
 });
 
 // =====================
@@ -66,22 +69,32 @@ const client = new Client({
 // =====================
 const commands = [
   { name: "submit", description: "Submit your edit" },
-  { name: "resubmit", description: "Update your submission" },
   { name: "rank", description: "Check your rank" },
   { name: "leaderboard", description: "Top ranked users" },
-  { name: "history", description: "View your submission history" }
+  { name: "resubmit", description: "Update your submission" }
 ];
 
 const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
 
+// =====================
+// AUTO REGISTER COMMANDS
+// =====================
 async function deployCommands() {
-  await rest.put(
-    Routes.applicationGuildCommands(
-      process.env.CLIENT_ID,
-      process.env.GUILD_ID
-    ),
-    { body: commands }
-  );
+  try {
+    console.log("🔄 Updating slash commands...");
+
+    await rest.put(
+      Routes.applicationGuildCommands(
+        process.env.CLIENT_ID,
+        process.env.GUILD_ID
+      ),
+      { body: commands }
+    );
+
+    console.log("✅ Commands updated!");
+  } catch (err) {
+    console.error("❌ Command update failed:", err);
+  }
 }
 
 // =====================
@@ -98,33 +111,48 @@ client.once("ready", async () => {
 const cooldown = new Map();
 
 // =====================
+// RANK ORDER
+// =====================
+const rankOrder = ["A","S","S+","SS","SS+","SSS"];
+
+// =====================
+// FILE UPLOAD HANDLER
+// =====================
+client.on("messageCreate", async (message) => {
+  if (message.author.bot) return;
+
+  if (!cooldown.has(message.author.id)) return;
+
+  if (message.attachments.size > 0) {
+    const file = message.attachments.first().url;
+
+    await Submission.findOneAndUpdate(
+      { userId: message.author.id },
+      { proof: file },
+      { upsert: true }
+    );
+
+    await message.reply("✅ File proof received!");
+  }
+});
+
+// =====================
 // INTERACTIONS
 // =====================
 client.on("interactionCreate", async (interaction) => {
 
-  // =====================
   // COMMANDS
-  // =====================
   if (interaction.isChatInputCommand()) {
 
     // RANK
     if (interaction.commandName === "rank") {
       const data = await Submission.findOne({ userId: interaction.user.id });
-      if (!data?.rank) return interaction.reply("❌ No rank yet.");
+
+      if (!data || !data.rank) {
+        return interaction.reply("❌ No rank yet.");
+      }
+
       return interaction.reply(`🏆 Your rank: **${data.rank}**`);
-    }
-
-    // HISTORY
-    if (interaction.commandName === "history") {
-      const data = await Submission.find({ userId: interaction.user.id });
-
-      if (!data.length) return interaction.reply("❌ No submissions.");
-
-      const text = data.map(x =>
-        `🔗 ${x.link}\n🏆 ${x.rank || "Not ranked"}`
-      ).join("\n\n");
-
-      return interaction.reply(text);
     }
 
     // LEADERBOARD
@@ -138,16 +166,11 @@ client.on("interactionCreate", async (interaction) => {
         )
         .slice(0, 10);
 
-      const text = sorted.map((x, i) =>
+      let text = sorted.map((x, i) =>
         `#${i + 1} <@${x.userId}> → ${x.rank}`
       ).join("\n");
 
-      const embed = new EmbedBuilder()
-        .setTitle("🏆 Leaderboard")
-        .setDescription(text || "No data yet.")
-        .setColor("Gold");
-
-      return interaction.reply({ embeds: [embed] });
+      return interaction.reply(`🏆 Leaderboard:\n\n${text || "No data yet."}`);
     }
 
     // SUBMIT / RESUBMIT
@@ -174,8 +197,8 @@ client.on("interactionCreate", async (interaction) => {
 
       const proof = new TextInputBuilder()
         .setCustomId("proof")
-        .setLabel("Proof it's yours")
-        .setStyle(TextInputStyle.Paragraph);
+        .setLabel("Proof link (YouTube, Drive, etc)")
+        .setStyle(TextInputStyle.Short);
 
       modal.addComponents(
         new ActionRowBuilder().addComponents(link),
@@ -186,9 +209,7 @@ client.on("interactionCreate", async (interaction) => {
     }
   }
 
-  // =====================
-  // SUBMIT MODAL
-  // =====================
+  // MODAL SUBMIT
   if (interaction.isModalSubmit() && interaction.customId === "submit_modal") {
 
     const link = interaction.fields.getTextInputValue("link");
@@ -196,7 +217,7 @@ client.on("interactionCreate", async (interaction) => {
 
     await Submission.findOneAndUpdate(
       { userId: interaction.user.id },
-      { link, proof, date: new Date(), rank: null },
+      { link, proof, date: new Date() },
       { upsert: true }
     );
 
@@ -204,7 +225,7 @@ client.on("interactionCreate", async (interaction) => {
 
     const embed = new EmbedBuilder()
       .setTitle("📩 New Submission")
-      .setDescription(`👤 <@${interaction.user.id}>\n🔗 ${link}\n📸 ${proof}`)
+      .setDescription(`👤 <@${interaction.user.id}>\n🔗 ${link}\n📸 ${proof || "Check attachments"}`)
       .setColor("Blue");
 
     const buttons = new ActionRowBuilder().addComponents(
@@ -218,31 +239,21 @@ client.on("interactionCreate", async (interaction) => {
 
     await channel.send({ embeds: [embed], components: [buttons] });
 
-    await interaction.user.send("✅ Submission sent!").catch(() => {});
+    await interaction.user.send(
+      "✅ Submission sent!\n\n📌 You can also upload a FILE here as proof if needed."
+    );
+
     return interaction.reply({ content: "Submitted!", ephemeral: true });
   }
 
-  // =====================
   // RANK BUTTON
-  // =====================
   if (interaction.isButton() && interaction.customId.startsWith("rank_")) {
 
     if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
       return interaction.reply({ content: "❌ Admin only.", ephemeral: true });
     }
 
-    const parts = interaction.customId.split("_");
-    const userId = parts.pop();
-    const rank = parts.slice(1).join("_");
-
-    const existing = await Submission.findOne({ userId });
-
-    if (existing?.rank) {
-      await interaction.reply({
-        content: `⚠️ Already ranked (${existing.rank}). Overriding...`,
-        ephemeral: true
-      });
-    }
+    const [_, rank, userId] = interaction.customId.split("_");
 
     await Submission.findOneAndUpdate({ userId }, { rank });
 
@@ -260,26 +271,22 @@ client.on("interactionCreate", async (interaction) => {
     return interaction.showModal(modal);
   }
 
-  // =====================
   // FINAL FEEDBACK
-  // =====================
   if (interaction.isModalSubmit() && interaction.customId.startsWith("feedback_")) {
 
-    const parts = interaction.customId.split("_");
-    const userId = parts[1];
-    const rank = parts.slice(2).join("_");
-
+    const [_, userId, rank] = interaction.customId.split("_");
     const msg = interaction.fields.getTextInputValue("msg");
 
     const user = await client.users.fetch(userId);
-    const member = await interaction.guild.members.fetch(userId);
+    const guild = await client.guilds.fetch(process.env.GUILD_ID);
+    const member = await guild.members.fetch(userId);
 
     await member.roles.remove(Object.values(rankRoles)).catch(() => {});
 
     const roleId = rankRoles[rank];
     if (roleId) await member.roles.add(roleId).catch(() => {});
 
-    await user.send(`🏆 Rank: **${rank}**\n\n💬 ${msg}`).catch(() => {});
+    await user.send(`🏆 Rank: **${rank}**\n\n💬 ${msg}`);
 
     const resultChannel = await client.channels.fetch(process.env.RESULT_CHANNEL_ID);
 
