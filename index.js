@@ -19,17 +19,27 @@ import {
 dotenv.config();
 
 // =====================
-// KEEP ALIVE
+// KEEP ALIVE (RENDER)
 // =====================
 const app = express();
 app.get("/", (req, res) => res.send("Bot running"));
-app.listen(process.env.PORT || 3000);
+app.listen(process.env.PORT || 3000, () => {
+  console.log("🌐 Web server running");
+});
 
 // =====================
 // DATABASE
 // =====================
-await mongoose.connect(process.env.MONGO_URI);
+try {
+  await mongoose.connect(process.env.MONGO_URI);
+  console.log("✅ MongoDB connected");
+} catch (err) {
+  console.error("❌ MongoDB failed:", err);
+}
 
+// =====================
+// MODEL
+// =====================
 const Submission = mongoose.model("Submission", new mongoose.Schema({
   userId: String,
   link: String,
@@ -38,7 +48,7 @@ const Submission = mongoose.model("Submission", new mongoose.Schema({
 }));
 
 // =====================
-// ROLE MAP
+// CONFIG
 // =====================
 const rankRoles = {
   "A": "1488208696759685190",
@@ -50,6 +60,7 @@ const rankRoles = {
 };
 
 const rankOrder = ["A","S","S+","SS","SS+","SSS"];
+const cooldown = new Map();
 
 // =====================
 // CLIENT
@@ -69,6 +80,9 @@ const commands = [
 
 const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
 
+// =====================
+// DEPLOY COMMANDS
+// =====================
 async function deployCommands() {
   try {
     await rest.put(
@@ -78,16 +92,40 @@ async function deployCommands() {
       ),
       { body: commands }
     );
-    console.log("✅ Commands deployed");
+    console.log("✅ Slash commands deployed");
   } catch (err) {
-    console.error("❌ Command deploy error:", err);
+    console.error("❌ Command deploy failed:", err);
   }
 }
 
+// =====================
+// READY
+// =====================
 client.once("ready", async () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
+  console.log(`🤖 Logged in as ${client.user.tag}`);
   await deployCommands();
 });
+
+// =====================
+// SAFE FETCH FUNCTIONS
+// =====================
+async function getGuild(id) {
+  try {
+    return await client.guilds.fetch(id);
+  } catch (err) {
+    console.error("❌ Guild fetch failed:", err);
+    return null;
+  }
+}
+
+async function getChannel(guild, id) {
+  try {
+    return await guild.channels.fetch(id);
+  } catch (err) {
+    console.error("❌ Channel fetch failed:", err);
+    return null;
+  }
+}
 
 // =====================
 // INTERACTIONS
@@ -95,9 +133,22 @@ client.once("ready", async () => {
 client.on("interactionCreate", async (interaction) => {
   try {
 
+    // =====================
+    // COMMANDS
+    // =====================
     if (interaction.isChatInputCommand()) {
 
       if (interaction.commandName === "submit") {
+
+        if (cooldown.has(interaction.user.id)) {
+          return interaction.reply({
+            content: "⏳ Wait before submitting again.",
+            flags: 64
+          });
+        }
+
+        cooldown.set(interaction.user.id, true);
+        setTimeout(() => cooldown.delete(interaction.user.id), 30000);
 
         const modal = new ModalBuilder()
           .setCustomId("submit_modal")
@@ -145,83 +196,62 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     // =====================
-    // MODAL SUBMIT (FIXED + DEBUG)
+    // SUBMIT MODAL
     // =====================
     if (interaction.isModalSubmit() && interaction.customId === "submit_modal") {
 
+      const link = interaction.fields.getTextInputValue("link");
+
+      await Submission.findOneAndUpdate(
+        { userId: interaction.user.id },
+        { link, date: new Date() },
+        { upsert: true }
+      );
+
+      console.log("📥 Submission saved");
+
+      const guild = await getGuild(process.env.TARGET_GUILD_ID);
+      if (!guild) {
+        return interaction.reply({ content: "❌ Target server not found.", flags: 64 });
+      }
+
+      const channel = await getChannel(guild, process.env.REVIEW_CHANNEL_ID);
+      if (!channel) {
+        return interaction.reply({ content: "❌ Review channel not found.", flags: 64 });
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle("📩 New Submission")
+        .setDescription(`👤 <@${interaction.user.id}>\n🔗 ${link}`)
+        .setColor("Blue");
+
+      const buttons = new ActionRowBuilder().addComponents(
+        rankOrder.map(rank =>
+          new ButtonBuilder()
+            .setCustomId(`rank_${rank}_${interaction.user.id}`)
+            .setLabel(rank)
+            .setStyle(ButtonStyle.Primary)
+        )
+      );
+
       try {
-        const link = interaction.fields.getTextInputValue("link");
-
-        await Submission.findOneAndUpdate(
-          { userId: interaction.user.id },
-          { link, date: new Date() },
-          { upsert: true }
-        );
-
-        console.log("📥 Submission saved");
-
-        console.log("TARGET_GUILD_ID:", process.env.TARGET_GUILD_ID);
-        console.log("REVIEW_CHANNEL_ID:", process.env.REVIEW_CHANNEL_ID);
-
-        const guild = await client.guilds.fetch(process.env.TARGET_GUILD_ID)
-          .catch(err => {
-            console.error("❌ Guild fetch failed:", err);
-            return null;
-          });
-
-        if (!guild) {
-          return interaction.reply({
-            content: "❌ Cannot find target server.",
-            flags: 64
-          });
-        }
-
-        console.log("✅ Guild found:", guild.name);
-
-        const channel = await guild.channels.fetch(process.env.REVIEW_CHANNEL_ID)
-          .catch(err => {
-            console.error("❌ Channel fetch failed:", err);
-            return null;
-          });
-
-        if (!channel) {
-          return interaction.reply({
-            content: "❌ Cannot find review channel.",
-            flags: 64
-          });
-        }
-
-        console.log("✅ Channel found:", channel.name);
-
-        const embed = new EmbedBuilder()
-          .setTitle("📩 New Submission")
-          .setDescription(`👤 <@${interaction.user.id}>\n🔗 ${link}`)
-          .setColor("Blue");
-
-        const buttons = new ActionRowBuilder().addComponents(
-          rankOrder.map(rank =>
-            new ButtonBuilder()
-              .setCustomId(`rank_${rank}_${interaction.user.id}`)
-              .setLabel(rank)
-              .setStyle(ButtonStyle.Primary)
-          )
-        );
-
         await channel.send({ embeds: [embed], components: [buttons] });
-
-        console.log("✅ Message sent");
-
-        await interaction.user.send("✅ Submission sent!");
-        return interaction.reply({ content: "Submitted!", flags: 64 });
-
+        console.log("✅ Sent to review channel");
       } catch (err) {
-        console.error("❌ FULL ERROR:", err);
-
+        console.error("❌ Send failed:", err);
         return interaction.reply({
-          content: "❌ Internal error. Check logs.",
+          content: "❌ Cannot send message to review channel.",
           flags: 64
         });
       }
+
+      try {
+        await interaction.user.send("✅ Submission sent!");
+      } catch {
+        console.log("⚠️ Could not DM user");
+      }
+
+      return interaction.reply({ content: "Submitted!", flags: 64 });
     }
 
     // =====================
@@ -239,16 +269,20 @@ client.on("interactionCreate", async (interaction) => {
 
       const user = await client.users.fetch(userId);
 
-      await user.send(`🏆 Rank: **${rank}**`);
+      try {
+        await user.send(`🏆 Rank: **${rank}**`);
+      } catch {
+        console.log("⚠️ Could not DM ranked user");
+      }
 
       return interaction.reply({ content: "✅ Ranked!", flags: 64 });
     }
 
   } catch (err) {
-    console.error("❌ GLOBAL ERROR:", err);
+    console.error("🔥 GLOBAL ERROR:", err);
 
     if (!interaction.replied) {
-      interaction.reply({ content: "❌ Error occurred.", flags: 64 });
+      interaction.reply({ content: "❌ Unexpected error.", flags: 64 }).catch(()=>{});
     }
   }
 });
